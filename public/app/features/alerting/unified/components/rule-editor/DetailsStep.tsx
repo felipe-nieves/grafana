@@ -1,6 +1,6 @@
 import { css } from '@emotion/css';
 import classNames from 'classnames';
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useFormContext } from 'react-hook-form';
 
 import { GrafanaTheme2 } from '@grafana/data';
@@ -28,6 +28,8 @@ interface DetailsStepProps {
   initialFolder: RuleForm | null;
 }
 
+export const initialFolderLabel = 'Select a folder to store your rule.';
+
 export const DetailsStep = ({ initialFolder }: DetailsStepProps) => {
   const {
     register,
@@ -43,6 +45,7 @@ export const DetailsStep = ({ initialFolder }: DetailsStepProps) => {
 
   const folderFilter = useRuleFolderFilter(initialFolder);
 
+  const [folderLabel, setFolderLabel] = useState(initialFolderLabel);
   return (
     <RuleEditorSection
       stepNo={type === RuleFormType.cloudRecording ? 2 : 3}
@@ -117,6 +120,8 @@ export const DetailsStep = ({ initialFolder }: DetailsStepProps) => {
                   enableCreateNew={contextSrv.hasPermission(AccessControlAction.FoldersCreate)}
                   enableReset={true}
                   filter={folderFilter}
+                  folderLabel={folderLabel}
+                  setFolderLabel={setFolderLabel}
                 />
               )}
               name="folder"
