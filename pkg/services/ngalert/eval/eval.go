@@ -11,14 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grafana/grafana/pkg/components/simplejson"
 	"github.com/grafana/grafana/pkg/expr"
 	"github.com/grafana/grafana/pkg/expr/classic"
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/services/datasources"
 	"github.com/grafana/grafana/pkg/services/ngalert/models"
 	"github.com/grafana/grafana/pkg/services/org"
-	"github.com/grafana/grafana/pkg/services/secrets"
 	"github.com/grafana/grafana/pkg/services/user"
 	"github.com/grafana/grafana/pkg/setting"
 
@@ -38,7 +36,6 @@ type evaluatorImpl struct {
 	cfg               *setting.Cfg
 	log               log.Logger
 	dataSourceCache   datasources.CacheService
-	secretsService    secrets.Service
 	expressionService *expr.Service
 }
 
@@ -46,13 +43,11 @@ func NewEvaluator(
 	cfg *setting.Cfg,
 	log log.Logger,
 	datasourceCache datasources.CacheService,
-	secretsService secrets.Service,
 	expressionService *expr.Service) Evaluator {
 	return &evaluatorImpl{
 		cfg:               cfg,
 		log:               log,
 		dataSourceCache:   datasourceCache,
-		secretsService:    secretsService,
 		expressionService: expressionService,
 	}
 }
@@ -164,7 +159,7 @@ type AlertExecCtx struct {
 }
 
 // getExprRequest validates the condition, gets the datasource information and creates an expr.Request from it.
-func getExprRequest(ctx AlertExecCtx, data []models.AlertQuery, now time.Time, dsCacheService datasources.CacheService, secretsService secrets.Service) (*expr.Request, error) {
+func getExprRequest(ctx AlertExecCtx, data []models.AlertQuery, now time.Time, dsCacheService datasources.CacheService) (*expr.Request, error) {
 	req := &expr.Request{
 		OrgId: ctx.OrgID,
 		Headers: map[string]string{
@@ -207,19 +202,6 @@ func getExprRequest(ctx AlertExecCtx, data []models.AlertQuery, now time.Time, d
 			datasources[q.DatasourceUID] = ds
 		}
 
-		// If the datasource has been configured with custom HTTP headers
-		// then we need to add these to the request
-		decryptedData, err := secretsService.DecryptJsonData(ctx.Ctx, ds.SecureJsonData)
-		if err != nil {
-			return nil, err
-		}
-		customHeaders := getCustomHeaders(ds.JsonData, decryptedData)
-		for k, v := range customHeaders {
-			if _, ok := req.Headers[k]; !ok {
-				req.Headers[k] = v
-			}
-		}
-
 		req.Queries = append(req.Queries, expr.Query{
 			TimeRange: expr.TimeRange{
 				From: q.RelativeTimeRange.ToTimeRange(now).From,
@@ -234,32 +216,6 @@ func getExprRequest(ctx AlertExecCtx, data []models.AlertQuery, now time.Time, d
 		})
 	}
 	return req, nil
-}
-
-func getCustomHeaders(jsonData *simplejson.Json, decryptedValues map[string]string) map[string]string {
-	headers := make(map[string]string)
-	if jsonData == nil {
-		return headers
-	}
-
-	index := 1
-	for {
-		headerNameSuffix := fmt.Sprintf("httpHeaderName%d", index)
-		headerValueSuffix := fmt.Sprintf("httpHeaderValue%d", index)
-
-		key := jsonData.Get(headerNameSuffix).MustString()
-		if key == "" {
-			// No (more) header values are available
-			break
-		}
-
-		if val, ok := decryptedValues[headerValueSuffix]; ok {
-			headers[key] = val
-		}
-		index++
-	}
-
-	return headers
 }
 
 type NumberValueCapture struct {
@@ -347,7 +303,7 @@ func queryDataResponseToExecutionResults(c models.Condition, execResp *backend.Q
 	return result
 }
 
-func executeQueriesAndExpressions(ctx AlertExecCtx, data []models.AlertQuery, now time.Time, exprService *expr.Service, dsCacheService datasources.CacheService, secretsService secrets.Service) (resp *backend.QueryDataResponse, err error) {
+func executeQueriesAndExpressions(ctx AlertExecCtx, data []models.AlertQuery, now time.Time, exprService *expr.Service, dsCacheService datasources.CacheService) (resp *backend.QueryDataResponse, err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			ctx.Log.Error("alert rule panic", "error", e, "stack", string(debug.Stack()))
@@ -360,7 +316,7 @@ func executeQueriesAndExpressions(ctx AlertExecCtx, data []models.AlertQuery, no
 		}
 	}()
 
-	queryDataReq, err := getExprRequest(ctx, data, now, dsCacheService, secretsService)
+	queryDataReq, err := getExprRequest(ctx, data, now, dsCacheService)
 	if err != nil {
 		return nil, err
 	}
@@ -375,18 +331,18 @@ func executeQueriesAndExpressions(ctx AlertExecCtx, data []models.AlertQuery, no
 //
 // For example, given the following:
 //
-//		map[string]string{
-//			"ref1": "datasource1",
-//			"ref2": "datasource1",
-//			"ref3": "datasource2",
-//		}
+//	map[string]string{
+//		"ref1": "datasource1",
+//		"ref2": "datasource1",
+//		"ref3": "datasource2",
+//	}
 //
 // we would expect:
 //
-//  	map[string][]string{
-// 			"datasource1": []string{"ref1", "ref2"},
-//			"datasource2": []string{"ref3"},
-//		}
+//	 	map[string][]string{
+//				"datasource1": []string{"ref1", "ref2"},
+//				"datasource2": []string{"ref3"},
+//			}
 func datasourceUIDsToRefIDs(refIDsToDatasourceUIDs map[string]string) map[string][]string {
 	if refIDsToDatasourceUIDs == nil {
 		return nil
@@ -421,12 +377,12 @@ func datasourceUIDsToRefIDs(refIDsToDatasourceUIDs map[string]string) map[string
 // Also, each Frame must be uniquely identified by its Field.Labels or a single Error result will be returned.
 //
 // Per Frame, data becomes a State based on the following rules:
-//  - Empty or zero length Frames result in NoData.
-//  - If a value:
-//    - 0 results in Normal.
-//    - Nonzero (e.g 1.2, NaN) results in Alerting.
-//    - nil results in noData.
-//    - unsupported Frame schemas results in Error.
+//   - Empty or zero length Frames result in NoData.
+//   - If a value:
+//   - 0 results in Normal.
+//   - Nonzero (e.g 1.2, NaN) results in Alerting.
+//   - nil results in noData.
+//   - unsupported Frame schemas results in Error.
 func evaluateExecutionResult(execResults ExecutionResults, ts time.Time) Results {
 	evalResults := make([]Result, 0)
 
@@ -611,7 +567,7 @@ func (e *evaluatorImpl) QueriesAndExpressionsEval(ctx context.Context, orgID int
 
 	alertExecCtx := AlertExecCtx{OrgID: orgID, Ctx: alertCtx, ExpressionsEnabled: e.cfg.ExpressionsEnabled, Log: e.log}
 
-	execResult, err := executeQueriesAndExpressions(alertExecCtx, data, now, e.expressionService, e.dataSourceCache, e.secretsService)
+	execResult, err := executeQueriesAndExpressions(alertExecCtx, data, now, e.expressionService, e.dataSourceCache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute conditions: %w", err)
 	}

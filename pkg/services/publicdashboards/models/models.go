@@ -49,6 +49,10 @@ var (
 		Reason:     "Public dashboard has template variables",
 		StatusCode: 422,
 	}
+	ErrPublicDashboardBadRequest = PublicDashboardErr{
+		Reason:     "Bad Request",
+		StatusCode: 400,
+	}
 )
 
 type PublicDashboard struct {
@@ -98,14 +102,17 @@ func (pd PublicDashboard) BuildTimeSettings(dashboard *models.Dashboard) *TimeSe
 	return ts
 }
 
-//
 // DTO for transforming user input in the api
-//
 type SavePublicDashboardConfigDTO struct {
 	DashboardUid    string
 	OrgId           int64
 	UserId          int64
 	PublicDashboard *PublicDashboard
+}
+
+type PublicDashboardQueryDTO struct {
+	IntervalMs    int64
+	MaxDataPoints int64
 }
 
 //
